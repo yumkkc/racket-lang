@@ -1,0 +1,243 @@
+#lang plait
+
+(define-type Exp
+  (numE [n : Number])
+  (idE [s : Symbol])
+  (plusE [l : Exp] 
+         [r : Exp])
+  (multE [l : Exp]
+         [r : Exp])
+  (appE [s : Symbol]
+        [arg : Exp])
+  (letE [n : Symbol] 
+        [rhs : Exp]
+        [body : Exp]))
+
+(define-type Func-Defn
+  (fd [name : Symbol] 
+      [arg : Symbol] 
+      [body : Exp]))
+
+(define-type Binding
+  (bind [name : Symbol]
+        [val : Number]))
+
+(define-type-alias Env (Listof Binding))  
+
+;; An EXP is either
+;; - `NUMBER
+;; - `SYMBOL
+;; - `{+ EXP EXP}
+;; - `{* EXP EXP}
+;; - `{SYMBOL EXP)
+;; - `{let {[SYMBOL EXP]} EXP}
+
+(module+ test
+  (print-only-errors #t))
+
+;; parse ----------------------------------------
+(define (parse [s : S-Exp]) : Exp
+  (cond
+    [(s-exp-match? `NUMBER s) (numE (s-exp->number s))]
+    [(s-exp-match? `SYMBOL s) (idE (s-exp->symbol s))]
+    [(s-exp-match? `{+ ANY ANY} s)
+     (plusE (parse (second (s-exp->list s)))
+            (parse (third (s-exp->list s))))]
+    [(s-exp-match? `{* ANY ANY} s)
+     (multE (parse (second (s-exp->list s)))
+            (parse (third (s-exp->list s))))]
+    [(s-exp-match? `{SYMBOL ANY} s)
+     (appE (s-exp->symbol (first (s-exp->list s)))
+           (parse (second (s-exp->list s))))]
+    [(s-exp-match? `{let {[SYMBOL ANY]} ANY} s)
+     (let ([bs (s-exp->list (first
+                             (s-exp->list (second
+                                           (s-exp->list s)))))])
+       (letE (s-exp->symbol (first bs))
+             (parse (second bs))
+             (parse (third (s-exp->list s)))))]
+    [else (error 'parse "invalid input")]))
+
+(define (parse-fundef [s : S-Exp]) : Func-Defn
+  (cond
+    [(s-exp-match? `{define {SYMBOL SYMBOL} ANY} s)
+     (fd (s-exp->symbol (first (s-exp->list (second (s-exp->list s)))))
+         (s-exp->symbol (second (s-exp->list (second (s-exp->list s)))))
+         (parse (third (s-exp->list s))))]
+    [else (error 'parse-fundef "invalid input")]))
+
+(module+ test
+  (test (parse `2)
+        (numE 2))
+  (test (parse `x)
+        (idE 'x))
+  (test (parse `{+ 2 1})
+        (plusE (numE 2) (numE 1)))
+  (test (parse `{* 3 4})
+        (multE (numE 3) (numE 4)))
+  (test (parse `{+ {* 3 4} 8})
+        (plusE (multE (numE 3) (numE 4))
+               (numE 8)))
+  (test (parse `{double 9})
+        (appE 'double (numE 9)))
+  (test (parse `{let {[x {+ 1 2}]}
+                  y})
+        (letE 'x (plusE (numE 1) (numE 2))
+              (idE 'y)))
+  (test/exn (parse `{{+ 1 2}})
+            "invalid input")
+
+  (test (parse-fundef `{define {double x} {+ x x}})
+        (fd 'double 'x (plusE (idE 'x) (idE 'x))))
+  (test/exn (parse-fundef `{def {f x} x})
+            "invalid input")
+
+  (define double-def
+    (parse-fundef `{define {double x} {+ x x}}))
+  (define quadruple-def
+    (parse-fundef `{define {quadruple x} {double {double x}}})))
+
+
+;; interp ----------------------------------------
+(define (interp [a : Exp] [env :  Env] [defs : (Listof Func-Defn)]) : Number
+  (type-case Exp a
+    [(numE n) n]
+    [(idE s) (lookup s env)]
+    [(plusE l r) (+ (interp l env defs) (interp r env defs))]
+    [(multE l r) (* (interp l env defs) (interp r env defs))]
+    [(appE s arg) (local [(define fd (get-fundef s defs))]
+                   (interp (fd-body fd)
+                           (extend-env (bind (fd-arg fd)
+                                             (interp arg env defs))
+                                       mt-env)
+                           defs))]
+    [(letE n rhs body) (interp body
+                               (extend-env
+                                (bind n (interp rhs env defs))
+                                env)
+                               defs)]))
+
+(module+ test
+  (test (interp (parse `2)  mt-env empty)
+        2)
+  (test/exn (interp (parse `x) mt-env empty)
+            "free variable")
+
+  (test (interp (parse `x)
+                (extend-env (bind 'x 1) mt-env)
+                empty)
+        1)
+  (test (interp (parse `{+ 2 1}) mt-env empty)
+        3)
+  (test (interp (parse `{* 2 1}) mt-env empty)
+        2)
+  (test (interp (parse `{+ {* 2 3} {+ 5 8}})
+                mt-env
+                empty)
+        19)
+  (test (interp (parse `{double 8})
+                mt-env
+                (list double-def))
+        16)
+  (test (interp (parse `{quadruple 8})
+                mt-env
+                (list double-def quadruple-def))
+        32)
+  (test (interp (parse `{let {[x 5]}
+                          {+ x x}})
+                mt-env
+                empty)
+        10)
+  (test/exn (interp (parse `{let {[y 5]} {test 10}})
+                    mt-env
+                    (list (parse-fundef `{define {test x} {+ x y}})))
+            "free variable")
+
+
+  )
+
+;; get-fundef ----------------------------------------
+(define (get-fundef [s : Symbol] [defs : (Listof Func-Defn)]) : Func-Defn
+  (type-case (Listof Func-Defn) defs
+    [empty (error 'get-fundef "undefined function")]
+    [(cons def rst-defs) (if (eq? s (fd-name def))
+                             def
+                             (get-fundef s rst-defs))]))
+
+(module+ test
+  (test (get-fundef 'double (list double-def))
+        double-def)
+  (test (get-fundef 'double (list double-def quadruple-def))
+        double-def)
+  (test (get-fundef 'double (list quadruple-def double-def))
+        double-def)
+  (test (get-fundef 'quadruple (list quadruple-def double-def))
+        quadruple-def)
+  (test/exn (get-fundef 'double empty)
+            "undefined function"))
+
+;; subst ----------------------------------------
+(define (subst [what : Exp] [for : Symbol] [in : Exp])
+  (type-case Exp in
+    [(numE n) in]
+    [(idE s) (if (eq? for s)
+                 what
+                 in)]
+    [(plusE l r) (plusE (subst what for l)
+                        (subst what for r))]
+    [(multE l r) (multE (subst what for l)
+                        (subst what for r))]
+    [(appE s arg) (appE s (subst what for arg))]
+    [(letE n rhs body) 
+          (letE n
+                (subst what for rhs)
+                (if (symbol=? n for)
+                    body
+                    (subst what for body)))]))
+
+(module+ test
+  (test (subst (parse `8) 'x (parse `9))
+        (numE 9))
+  (test (subst (parse `8) 'x (parse `x))
+        (numE 8))
+  (test (subst (parse `8) 'x (parse `y))
+        (idE 'y))
+  (test (subst (parse `8) 'x (parse `{+ x y}))
+        (parse `{+ 8 y}))
+  (test (subst (parse `8) 'x (parse `{* y x}))
+        (parse `{* y 8}))
+  (test (subst (parse `8) 'x (parse `{double x}))
+        (parse `{double 8}))
+  (test (subst (parse `8) 'x (parse `{let {[y x]} x}))
+        (parse `{let {[y 8]} 8}))
+  (test (subst (parse `8) 'x (parse `{let {[x x]} x}))
+        (parse `{let {[x 8]} x})))
+
+
+;; Environment definition
+(define mt-env empty)
+(define extend-env cons)
+
+
+;; lookup
+(define (lookup [n : Symbol] [env : Env]) : Number
+  (type-case Env env
+    [empty (error 'lookup "free variable")]
+    [(cons b rst-env) (cond
+                        [(symbol=? (bind-name b) n)
+                          (bind-val b)]
+                          [else (lookup n rst-env)])]))
+
+
+(module+ test
+  (test/exn (lookup 'x mt-env)
+            "free variable")
+  (test (lookup 'x (extend-env (bind 'x 1) mt-env))
+        1)
+  (test (lookup 'x (extend-env (bind 'y 1)
+                               (extend-env (bind 'x 2) mt-env)))
+        2)
+
+  (test (lookup 'y (extend-env (bind 'y 1)
+                               (extend-env (bind 'y 2) mt-env)))
+        1))  

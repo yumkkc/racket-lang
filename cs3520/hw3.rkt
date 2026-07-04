@@ -19,6 +19,8 @@
   (letE [n : Symbol] 
         [rhs : Exp]
         [body : Exp])
+  (hideE [n : Symbol]
+         [body : Exp])  
   (lamE [n : Symbol]
         [body : Exp])
   (appE [fun : Exp]
@@ -35,6 +37,13 @@
 
 (define mt-env empty)
 (define extend-env cons)
+
+(define (remove-bind [s : Symbol] [b : Env]) 
+  (type-case Env b
+    [empty (error 'remove-bind "Cannot remove binding from empty environment")]
+    [(cons b rst) (cond
+                    [(equal? (bind-name b) s) rst]
+                    [else (remove-bind s rst)])]))
 
 (module+ test
   (print-only-errors #t))
@@ -62,6 +71,9 @@
        (letE (s-exp->symbol (first bs))
              (parse (second bs))
              (parse (third (s-exp->list s)))))]
+    [(s-exp-match? `{unlet SYMBOL ANY} s)
+     (hideE (s-exp->symbol (second (s-exp->list s)))
+            (parse (third (s-exp->list s))))]
     [(s-exp-match? `{lambda {SYMBOL} ANY} s)
      (lamE (s-exp->symbol (first (s-exp->list 
                                   (second (s-exp->list s)))))
@@ -104,7 +116,11 @@
         (boolE #f))
 
   (test (parse `{= 2 2})
-        (compE (numE 2) (numE 2))))
+        (compE (numE 2) (numE 2)))
+
+    (test (parse `{let {[x 1]} {unlet x x}})
+        (letE 'x (numE 1) (hideE 'x (idE 'x))))
+)
 
 
 
@@ -125,6 +141,8 @@
                                (extend-env
                                 (bind n (interp rhs env))
                                 env))]
+    [(hideE n body) (interp body
+                            (remove-bind n env))]
     [(lamE n body) (closV n body env)]
     [(appE fun arg) (type-case Value (interp fun env)
                       [(closV n body c-env)
@@ -204,17 +222,10 @@
 
   (test (interp (parse `{let [{a 3}] {if {= a 3} {+ a a} 0}}) mt-env)
         (numV 6))
+  (test (interp (parse `{let {[x 1]} {let {[x 2]} {unlet x {+ x x}}}}) mt-env)
+        (numV 2)
   
-  )
-
-  #;
-  (time (interp (parse `{let {[x2 {lambda {n} {+ n n}}]}
-                          {let {[x4 {lambda {n} {x2 {x2 n}}}]}
-                            {let {[x16 {lambda {n} {x4 {x4 n}}}]}
-                              {let {[x256 {lambda {n} {x16 {x16 n}}}]}
-                                {let {[x65536 {lambda {n} {x256 {x256 n}}}]}
-                                  {x65536 1}}}}}})
-                mt-env))
+  ))
 
 ;; num+ and num* ----------------------------------------
 (define (num-op [op : (Number Number -> Number)] [l : Value] [r : Value]) : Value

@@ -5,11 +5,14 @@
   (boolV [b : Boolean])
   (closV [arg : Symbol]
          [body : Exp]
-         [env : Env]))
+         [env : Env])
+  (thunkV [e : Exp]))
 
 (define-type Exp
   (numE [n : Number])
   (boolE [b : Boolean])
+  (delayE [e : Exp])
+  (forceE [e : Exp])
   (compE [l : Exp] [r : Exp])
   (idE [s : Symbol])
   (plusE [l : Exp] 
@@ -78,6 +81,10 @@
      (lamE (s-exp->symbol (first (s-exp->list 
                                   (second (s-exp->list s)))))
            (parse (third (s-exp->list s))))]
+    [(s-exp-match? `{delay ANY} s)
+     (delayE (parse (second (s-exp->list s))))]
+    [(s-exp-match? `{force ANY} s)
+     (forceE (parse (second (s-exp->list s))))]
     [(s-exp-match? `{ANY ANY} s)
      (appE (parse (first (s-exp->list s)))
            (parse (second (s-exp->list s))))]
@@ -152,6 +159,10 @@
                                       (interp arg env))
                                 c-env))]
                       [else (error 'interp "not a function")])]
+    [(delayE e) (thunkV e)]
+    [(forceE e) (interp
+                 (thunkV-e (interp e env))
+                 env)]
     [(condE p t f) (local [(define pv (interp p env))]
                      (cond
                        [(boolV? pv) (if (boolV-b pv)
